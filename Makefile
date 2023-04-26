@@ -1,5 +1,5 @@
 CC=gcc
 
-
-jasn: src/main.o
-	$(CC) -o $@ $^
+jasn:
+	zig build
+	cp ./zig-out/bin/jasn .

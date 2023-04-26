@@ -1,2 +1,2 @@
 # ATTRIBUTIONS
-- [https://www.sitepoint.com/colors-json-example/]("colors.json" example case)
+- ["colors.json" example case](https://www.sitepoint.com/colors-json-example/)

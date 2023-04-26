@@ -8,23 +8,41 @@
 #include <stdlib.h>
 
 #define PAGE_SIZE 4096
+#define MAX_DEPTH 100
+#define CUR(r) (r->buf[r->i])
 
 enum ParserState {
     PARSE_JSON_START,
     PARSE_JSON_END,
     PARSE_KEY,
     PARSE_VALUE,
-    PARSE_OBJ_VALUE_END,       // ',' or '}'
-    PARSE_KEY_VALUE_SEP,  // ':'
+    PARSE_KEY_VALUE_SEP,
     PARSE_STRING,
-    PARSE_ARRAY_VALUE,
-    PARSE_ARRAY_VALUE_END, // ',' or ']'
+    PARSE_VALUE_END,
+    PARSE_NUMBER,
+    PARSE_FLOAT,
 };
 
+enum CollectionType {
+    COLLECTION_ARR,
+    COLLECTION_OBJ,
+};
+
+/// Specifies the beginning and end of an item
+/// in the json buffer
 typedef struct {
-    unsigned int i;
+    uint32_t start;
+    uint32_t end;
+} ItemRange;
+
+typedef struct {
+    uint32_t i;
     size_t len;
     char * buf;
+    // depth in depth stack
+    uint32_t d; 
+    // depth stack: trace of type of collections we have recursed into
+    enum CollectionType ds[MAX_DEPTH];
 } JsonReader;
 
 enum JsonValueType {
@@ -39,17 +57,10 @@ typedef struct {
     uint32_t i;
 } JsonValue;
 
-/// Specifies the beginning and end of a string
-/// in the char[] of all strings
-typedef struct {
-    uint32_t start;
-    uint32_t end;
-} StringIdx;
-
 typedef struct {
     uint32_t i;
     char buf[PAGE_SIZE];
-    StringIdx indices[PAGE_SIZE];
+    ItemRange indices[PAGE_SIZE];
 } StringsBuf;
 
 typedef struct {
@@ -77,42 +88,17 @@ char * parser_state_str(enum ParserState state) {
             return "PARSE_KEY";
         case PARSE_VALUE:
             return "PARSE_VALUE";
-        case PARSE_OBJ_VALUE_END:
-            return "PARSE_OBJ_VALUE_END";
         case PARSE_KEY_VALUE_SEP:
             return "PARSE_KEY_VALUE_SEP";
         case PARSE_STRING:
             return "PARSE_STRING";
+        case PARSE_VALUE_END:
+            return "PARSE_VALUE_END";
         default:
             fprintf(stderr, "Asked to print unhandled state: %d\n", state);
             return "UNKNOWN";
     }
 }
-
-
-StringIdx parse_string(JsonReader * r, StringsBuf * sb) {
-    char c;
-    StringIdx i = {.start=r->i};
-    do {
-        c = r->buf[r->i];
-        r->i++;
-    } while (c != '"');
-    return i;
-    // int i = sb->i;
-    // char c;
-    // while ((c=getchar()) != '"') {
-    //     sb->buf[i] = c;
-    //     i++;
-    // }
-    // sb->buf[i] = '\0';
-    // printf("found str: %s\n", sb->buf + sb->i);
-    // StringIdx ends = {.start=sb->i, .end=i};
-    // sb->i = i+1;
-    // return ends;
-}
-
-/// returns false if finds end of array
-// bool parse_array()
 
 // https://www.json.org/json-en.html
 int main(int argc, char**argv) {
@@ -126,10 +112,10 @@ int main(int argc, char**argv) {
         perror("jasn");   
         exit(errno);
     }
-    JsonReader r = {.i=0, .buf=json, .len=bytes_read};
+    JsonReader r = {.i=0, .buf=json, .len=bytes_read, .d=0};
     // TODO: handle empty file
     size_t i;
-    char c;
+    unsigned char c;
     // TODO: int depth = 0; expect end when reaching } or ] at depth 0
 
     for (r.i = 0; r.i < r.len; r.i++) {
@@ -141,10 +127,12 @@ int main(int argc, char**argv) {
             case PARSE_JSON_START:
                 switch (c) {
                     case '{':
+                        r.ds[r.d] = COLLECTION_OBJ;
                         state = PARSE_KEY;
                         break;
                     case '[':
-                        state = PARSE_ARRAY_VALUE;
+                        r.ds[r.d] = COLLECTION_ARR;
+                        state = PARSE_VALUE;
                         break;
                     default:
                         fprintf(stderr, "PARSE ERROR: Expected object start '{' but found: %c\n", c);
@@ -175,63 +163,58 @@ int main(int argc, char**argv) {
                 state = PARSE_VALUE;
                 break;
             case PARSE_VALUE:
-                switch (c) {
-                    case '"':
-                        state = PARSE_STRING;
-                        next_state = PARSE_OBJ_VALUE_END;
-                        break;
-                    default:
-                        fprintf(stderr, "PARSE ERROR: Expected value but found: %c\n", c);
-                        return -1;
+                if (c == '"') {
+                    state = PARSE_STRING;
+                    next_state = PARSE_VALUE_END;
+                } else if (c == '[') {
+                    state = PARSE_VALUE;
+                    r.d++;
+                    r.ds[r.d] = COLLECTION_ARR;
+                } else if (c == '{') {
+                    state = PARSE_KEY;
+                    r.d++;
+                    r.ds[r.d] = COLLECTION_OBJ;
+                } else if (isdigit(c)) {
+                    // TODO: test for negatives
+                    state = PARSE_NUMBER;
+                    next_state = PARSE_VALUE_END;
                 }
-                break;
-            case PARSE_OBJ_VALUE_END:
-                switch (c) {
-                    case ',':
-                        state = PARSE_KEY;
-                        break;
-                    case '}':
-                        state = PARSE_JSON_START;
-                        break;
-                    default:
-                        fprintf(stderr, "PARSE ERROR: Expected end of object or comma but found: %c\n", c);
-                        return -1;
+                else {
+                    fprintf(stderr, "PARSE ERROR: Expected value but found: %c\n", c);
+                    return -1;
                 }
-                break;
-            case PARSE_ARRAY_VALUE:
-                switch (c) {
-                    case '"':
-                        state = PARSE_STRING;
-                        next_state = PARSE_ARRAY_VALUE_END;
-                        break;
-                    default:
-                        fprintf(stderr, "PARSE ERROR: Expected array value but found item beginning with '%c'\n", c);
-                        return -1;
+            case PARSE_VALUE_END:
+                if (c == ',') {
+                    state = r.ds[r.d] == COLLECTION_ARR ? PARSE_VALUE : PARSE_KEY;
+                    break;
                 }
-                break;
-            case PARSE_ARRAY_VALUE_END:
-                switch (c) {
-                    case ',':
-                        state = PARSE_ARRAY_VALUE;
-                        break;
-                    case ']':
-                        state = PARSE_JSON_END;
-                        break;
-                    default:
-                        fprintf(stderr, "PARSE_ERROR: expected ',' or ']' after array value but found '%c'\n", c);
-                }
-                break;
+                bool end_of_arr = r.ds[r.d] == COLLECTION_ARR && c == ']';
+                bool end_of_obj = r.ds[r.d] == COLLECTION_OBJ && c == '}';
 
+                if (end_of_arr || end_of_obj) {
+                    if (r.d==0) {
+                        state = PARSE_JSON_END;
+                    } else {
+                        r.d--;
+                    }
+                } else {
+                    fprintf(stderr, "PARSE_ERROR: expected ',' or ']' after array value but found '%c'\n", c);
+                }
+                break;
             case PARSE_STRING:
                 if (c == '"') {
                     state = next_state;
                     break;
                 } else {
-                    printf("%c", c);
+                    // TODO: store strings
                     break;
                 }
+            case PARSE_NUMBER:
+                if (c == '.' || c == 'e' || c=='E') {
+                    state = PARSE_FLOAT;
+                }
         }
-        fprintf(stderr, "char: '%c' state: %s\n", c, parser_state_str(state));
+        fprintf(stderr, "char: '%c' | depth: %d | type: %s | state: %s\n", c, r.d,r.ds[r.d] == COLLECTION_ARR ? "arr" : "obj", parser_state_str(state));
     }
 }
 
